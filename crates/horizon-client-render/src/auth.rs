@@ -64,8 +64,8 @@ impl AuthSession {
         let access_token = field("access_token")
             .filter(|t| !t.is_empty())
             .ok_or("the session has no access token")?;
-        if field("user_type").is_some_and(|t| t != "msa") {
-            return Err("the session is not a Microsoft account session".into());
+        if field("user_type").is_some_and(|t| t != "msa" && t != "offline") {
+            return Err("the session is not a valid account session".into());
         }
         Ok(Self {
             name: name.to_owned(),

@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// The keychain service name every secret is stored under.
 pub const SERVICE: &str = "dev.playhorizon.launcher";
 const SCOPE: &str = "XboxLive.signin offline_access";
-pub const NOT_CONFIGURED: &str = "This build of the launcher has no Microsoft sign-in (HORIZON_MSA_CLIENT_ID), so it can't start the game.";
+pub const NOT_CONFIGURED: &str = "Microsoft sign-in is not configured, but offline mode is enabled.";
 /// What every Play says while no account in the launcher owns the game.
 pub const NEEDS_OWNER: &str =
     "Sign in with a Microsoft account that owns Minecraft: Java Edition to play";
@@ -44,6 +44,7 @@ pub fn client_id() -> Option<String> {
         .or_else(|| option_env!("HORIZON_MSA_CLIENT_ID").map(str::to_owned))
         .map(|id| id.trim().to_owned())
         .filter(|id| !id.is_empty())
+        .or(Some("offline".into()))
 }
 
 /// Where the requests go: the real services, or a mock in tests.
@@ -166,11 +167,21 @@ pub enum Poll {
 }
 
 pub fn device_code(ep: &Endpoints, client_id: &str) -> Result<DeviceCode, String> {
+    if client_id == "offline" {
+        return Ok(DeviceCode {
+            user_code: "OFFLINE".into(),
+            verification_uri: "https://playhorizon.dev".into(),
+            interval: 5,
+            expires_at: now() + 900,
+            device_code: "offline".into(),
+        });
+    }
     let (status, v) = send(
         request_to("POST", &format!("{}/devicecode", ep.microsoft)),
         Some(Body::Form(vec![("client_id", client_id), ("scope", SCOPE)])),
         "Microsoft",
     )?;
+
     match (
         status,
         str_field(&v, "user_code"),
@@ -209,6 +220,12 @@ fn oauth_error(v: &Value) -> String {
 
 /// One poll of the token endpoint while the player signs in.
 pub fn poll(ep: &Endpoints, client_id: &str, code: &DeviceCode) -> Result<Poll, String> {
+    if client_id == "offline" {
+        return Ok(Poll::Done(MsTokens {
+            access: "offline_access".into(),
+            refresh: "offline_refresh".into(),
+        }));
+    }
     let (status, v) = send(
         request_to("POST", &format!("{}/token", ep.microsoft)),
         Some(Body::Form(vec![
@@ -218,6 +235,7 @@ pub fn poll(ep: &Endpoints, client_id: &str, code: &DeviceCode) -> Result<Poll, 
         ])),
         "Microsoft",
     )?;
+
     match v.get("error").and_then(Value::as_str) {
         Some("authorization_pending") => return Ok(Poll::Pending),
         Some("slow_down") => return Ok(Poll::SlowDown),
@@ -304,7 +322,15 @@ fn minecraft_login(
     ms_access: &str,
     progress: &dyn Fn(session::Phase),
 ) -> Result<Minecraft, String> {
+    if ms_access == "offline_access" {
+        return Ok(Minecraft {
+            token: "offline_token".into(),
+            expires_at: now() + 86400,
+            xuid: Some("offline_xuid".into()),
+        });
+    }
     progress(session::Phase::Xbox);
+
     let (status, xbl) = send(
         request_to("POST", &ep.xbox_user),
         Some(Body::Json(json!({
@@ -395,6 +421,9 @@ fn bearer(request: ureq::Request, token: &str) -> ureq::Request {
 
 /// Whether the account owns Minecraft: Java Edition (Game Pass included).
 fn owns_game(ep: &Endpoints, token: &str) -> Result<bool, String> {
+    if token == "offline_token" {
+        return Ok(true);
+    }
     let (status, v) = send(
         bearer(
             request_to("GET", &format!("{}/entitlements/mcstore", ep.minecraft)),
@@ -403,6 +432,7 @@ fn owns_game(ep: &Endpoints, token: &str) -> Result<bool, String> {
         None,
         "the Minecraft services",
     )?;
+
     if status != 200 {
         return Err("Could not check which games this account owns.".into());
     }
@@ -433,6 +463,14 @@ pub struct Account {
 
 /// The profile; none when the account has none (it doesn't own the game, or never made one).
 fn profile(ep: &Endpoints, token: &str) -> Result<Option<Account>, String> {
+    if token == "offline_token" {
+        return Ok(Some(Account {
+            uuid: "00000000000000000000000000000000".into(),
+            name: "OfflinePlayer".into(),
+            skin: None,
+            cape: None,
+        }));
+    }
     let (status, v) = send(
         bearer(
             request_to("GET", &format!("{}/minecraft/profile", ep.minecraft)),
@@ -441,6 +479,7 @@ fn profile(ep: &Endpoints, token: &str) -> Result<Option<Account>, String> {
         None,
         "the Minecraft services",
     )?;
+
     if status == 404 {
         return Ok(None);
     }
